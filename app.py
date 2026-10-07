@@ -8,6 +8,8 @@
 #             节点改按槽位领取（删 assign_node），旧多行 NODE_LINK 保留为兼容回退
 # 20261007-1355 配置校验加固：账号凭据 strip() 防误粘空白；配置不齐/ACCOUNT_INDEX 非法
 #             由静默 return 改为 sys.exit(1)，workflow 显式红叉并触发 GitHub 失败邮件
+# 20261007-1504 日志 IP 掩码：出口 IP / 强制 IPv4 改写 / IPv6 字面量警告统一 mask_ip()，
+#             每段只留首位数字加一个固定 *（不泄露段内位数），形如 1*.2*.3*.4*
 # ─────────────────────────────────────────────────────────
 
 import os
@@ -58,6 +60,19 @@ def mask_email(email: str) -> str:
             return f"{name}@{domain}"
     else:
         return email[:2] + '****'
+
+# 🆕 新增：IP 掩码——每段只留首位数字加一个固定 *（* 不代表位数），形如 1*.2*.3*.4*；
+#          IPv6 按冒号分组同样处理；非 IP 文本原样返回
+def mask_ip(ip: str) -> str:
+    ip = (ip or "").strip()
+    if not ip:
+        return ip
+    if ":" in ip:
+        return ":".join(g[0] + "*" if g else g for g in ip.split(":"))
+    parts = ip.split(".")
+    if len(parts) == 4 and all(p.isdigit() and p for p in parts):
+        return ".".join(p[0] + "*" for p in parts)
+    return ip
 
 #  Telegram 推送
 def send_tg_message(status_icon, status_text, extra_text="", email="", name="", flag="🇺🇸"):
@@ -143,7 +158,7 @@ def verify_proxy() -> bool:
                          proxies={"http": PROXY_LOCAL, "https": PROXY_LOCAL},
                          timeout=15)
         if r.status_code == 200:
-            print(f"✅ 代理实测可用，出口 IP: {r.text.strip()}")
+            print(f"✅ 代理实测可用，出口 IP: {mask_ip(r.text)}")   # 🆕 日志掩码
             return True
         print(f"⚠️ 代理实测返回 HTTP {r.status_code}")
     except Exception as e:
@@ -191,7 +206,7 @@ def retry_singbox_ipv4() -> bool:
         # IPv6 字面量在 Actions 上无路由，改不了
         try:
             socket.inet_pton(socket.AF_INET6, server)
-            print(f"⚠️ 节点服务器是 IPv6 字面量 {server}，runner 无 IPv6 出口，无法重试")
+            print(f"⚠️ 节点服务器是 IPv6 字面量 {mask_ip(server)}，runner 无 IPv6 出口，无法重试")   # 🆕 日志掩码
             continue
         except OSError:
             pass
@@ -200,7 +215,7 @@ def retry_singbox_ipv4() -> bool:
         except OSError as e:
             print(f"⚠️ 解析 {server} 的 A 记录失败: {e}")
             continue
-        print(f"🔧 强制 IPv4: {server} → {ipv4}")
+        print(f"🔧 强制 IPv4: {server} → {mask_ip(ipv4)}")   # 🆕 日志掩码：服务器域名保留，解析出的 IP 打码
         ob["server"] = ipv4   # tls.server_name 已在配置里是原域名/SNI，不受影响
         changed = True
 
@@ -626,7 +641,7 @@ def run_account(base_kwargs, acc, node_link, proxy_label) -> bool:
             print("✅ 浏览器已启动")
             try:
                 sb.open("https://api.ip.sb/ip")
-                print(f"🌐 当前出口真实 IP: {sb.get_text('body')}")
+                print(f"🌐 当前出口真实 IP: {mask_ip(sb.get_text('body'))}")   # 🆕 日志掩码
             except Exception:
                 pass
 

@@ -9,6 +9,7 @@
 #   ⚠️ cf-mitigated: challenge / Just a moment → 遇 CF 挑战页（IP 信誉一般，浏览器可能仍能过）
 #   ❌ cf-mitigated: block / 非 200 / 超时      → 节点不可用
 #   curl 无法执行 JS，Turnstile 交互挑战能否通过仍以真实续期流程为准。
+# 日志 IP 掩码（20261007-1504）：出口 IP 每段只留首位数字加固定 *（不泄露位数），形如 1*.2*.3*.4*。
 name: Test-Node-Link
 
 on:
@@ -39,6 +40,18 @@ jobs:
           PROXY=http://127.0.0.1:1081
           UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
           SUP="vless vmess trojan hysteria2 hy2 tuic anytls socks5 socks"
+
+          # IP 掩码：每段只留首位数字加固定 *（不泄露位数），IPv4 → 1*.2*.3*.4*；IPv6 按冒号分组同规则
+          mask_ip() {
+            local s
+            s=$(echo "$1" | tr -d '[:space:]')
+            [ -n "$s" ] || { echo ""; return; }
+            if echo "$s" | grep -q ':'; then
+              echo "$s" | awk -F: '{for(i=1;i<=NF;i++) printf "%s%s", (length($i)?substr($i,1,1)"*":""), (i<NF?":":"\n")}'
+            else
+              echo "$s" | awk -F. 'NF==4 {printf "%s*.%s*.%s*.%s*\n", substr($1,1,1), substr($2,1,1), substr($3,1,1), substr($4,1,1); next} {print}'
+            fi
+          }
 
           links=()
           if [ -n "$INPUT_LINK" ]; then
@@ -74,7 +87,7 @@ jobs:
             echo "── ① 出口 IP ──"
             ip=$(curl -x "$PROXY" -s --max-time 15 https://api.ip.sb/ip)
             if [ -n "$ip" ]; then
-              echo "✅ 出口 IP: $ip"
+              echo "✅ 出口 IP: $(mask_ip "$ip")"   # 日志掩码
             else
               echo "❌ 获取出口 IP 失败"
               fail=1; continue
@@ -83,7 +96,9 @@ jobs:
             echo "── ② Cloudflare 边缘可达性 ──"
             trace=$(curl -x "$PROXY" -s --max-time 15 https://www.cloudflare.com/cdn-cgi/trace)
             if [ -n "$trace" ]; then
-              echo "$trace" | grep -E '^(ip|loc|colo|http)=' || echo "$trace"
+              tip=$(echo "$trace" | sed -n 's/^ip=//p' | tr -d '[:space:]')
+              echo "$trace" | grep -v '^ip=' | grep -E '^(loc|colo|http)=' || echo "$trace" | grep -v '^ip='
+              [ -n "$tip" ] && echo "ip=$(mask_ip "$tip")"   # 日志掩码（兜底输出也已剔除原始 ip= 行）
               echo "✅ Cloudflare 边缘可达"
             else
               echo "❌ Cloudflare trace 请求失败"
