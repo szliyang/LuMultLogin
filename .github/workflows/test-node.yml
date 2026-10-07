@@ -1,0 +1,132 @@
+# 节点连通性测试工作流（20261007-1430）：
+# 用途：验证候选节点能否正常访问 Cloudflare 边缘与 betadash.lunes.host（不登录、不开浏览器）。
+# 触发：仅手动 workflow_dispatch。
+#   - inputs.node_link 填节点链接 → 只测该节点（注意：dispatch input 会留在 run 事件记录里，
+#     私有仓库可接受；本工作流末尾会清理历史 run 仅留最近 1 条）
+#   - 留空 → 依次测试 secrets NODE_LINK1 / NODE_LINK2
+# 判定：请求经本地 sing-box (127.0.0.1:1081) 代理发出——
+#   ✅ 200 且返回真实登录表单           → 节点可用
+#   ⚠️ cf-mitigated: challenge / Just a moment → 遇 CF 挑战页（IP 信誉一般，浏览器可能仍能过）
+#   ❌ cf-mitigated: block / 非 200 / 超时      → 节点不可用
+#   curl 无法执行 JS，Turnstile 交互挑战能否通过仍以真实续期流程为准。
+name: Test-Node-Link
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_link:
+        description: '待测节点链接（vless:// vmess:// trojan:// hysteria2:// tuic:// anytls:// socks5://），留空则测 NODE_LINK1/NODE_LINK2'
+        required: false
+        default: ''
+
+jobs:
+  test-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write            # gh run delete 清理记录需要
+    steps:
+      - name: 📥 下载 sing-box 安装脚本
+        run: wget -qO setup_proxy.sh https://main.ssss.nyc.mn/setup_proxy.sh
+
+      - name: 🔍 节点连通性测试
+        env:
+          INPUT_LINK: ${{ inputs.node_link }}
+          NODE_LINK1: ${{ secrets.NODE_LINK1 }}
+          NODE_LINK2: ${{ secrets.NODE_LINK2 }}
+        run: |
+          set -u
+          PROXY=http://127.0.0.1:1081
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+          SUP="vless vmess trojan hysteria2 hy2 tuic anytls socks5 socks"
+
+          links=()
+          if [ -n "$INPUT_LINK" ]; then
+            links+=("$INPUT_LINK")
+          else
+            [ -n "$NODE_LINK1" ] && links+=("$NODE_LINK1")
+            [ -n "$NODE_LINK2" ] && links+=("$NODE_LINK2")
+          fi
+          if [ ${#links[@]} -eq 0 ]; then
+            echo "❌ 未提供待测节点（inputs.node_link 与 NODE_LINK1/2 均为空）"
+            exit 1
+          fi
+
+          fail=0
+          for i in "${!links[@]}"; do
+            n=$((i+1))
+            echo ""
+            echo "=============== 测试节点 $n / ${#links[@]} ==============="
+
+            proto=$(echo "${links[$i]}" | cut -d: -f1)
+            if ! echo " $SUP " | grep -q " $proto "; then
+              echo "❌ [节点$n] 协议 [$proto] 不被 setup_proxy.sh 支持（支持: $SUP）"
+              fail=1; continue
+            fi
+
+            pkill -f sing-box 2>/dev/null || true
+            sleep 1
+            if ! NODE_LINK="${links[$i]}" bash setup_proxy.sh; then
+              echo "❌ [节点$n] sing-box 启动或出口连通失败（节点失效/被墙/参数错误）"
+              fail=1; continue
+            fi
+
+            echo "── ① 出口 IP ──"
+            ip=$(curl -x "$PROXY" -s --max-time 15 https://api.ip.sb/ip)
+            if [ -n "$ip" ]; then
+              echo "✅ 出口 IP: $ip"
+            else
+              echo "❌ 获取出口 IP 失败"
+              fail=1; continue
+            fi
+
+            echo "── ② Cloudflare 边缘可达性 ──"
+            trace=$(curl -x "$PROXY" -s --max-time 15 https://www.cloudflare.com/cdn-cgi/trace)
+            if [ -n "$trace" ]; then
+              echo "$trace" | grep -E '^(ip|loc|colo|http)=' || echo "$trace"
+              echo "✅ Cloudflare 边缘可达"
+            else
+              echo "❌ Cloudflare trace 请求失败"
+              fail=1; continue
+            fi
+
+            echo "── ③ betadash.lunes.host 登录页 ──"
+            code=$(curl -x "$PROXY" -s -A "$UA" -D /tmp/h_$n -o /tmp/b_$n \
+                   -w '%{http_code}' --max-time 20 'https://betadash.lunes.host/login?next=/')
+            echo "HTTP 状态码: ${code:-无响应}"
+            if [ "$code" = "200" ] && grep -q 'name="email"' /tmp/b_$n 2>/dev/null; then
+              echo "✅ [节点$n] 可正常访问 lunes 登录页（返回真实登录表单）"
+            elif grep -qi '^cf-mitigated: *block' /tmp/h_$n 2>/dev/null; then
+              echo "❌ [节点$n] 被 Cloudflare 明确拦截（cf-mitigated: block），建议换节点"
+              fail=1
+            elif grep -qi '^cf-mitigated: *challenge' /tmp/h_$n 2>/dev/null || grep -q 'Just a moment' /tmp/b_$n 2>/dev/null; then
+              echo "⚠️ [节点$n] 遇到 Cloudflare 挑战页（IP 信誉一般；真实浏览器可能仍能通过，建议优先选 ✅ 节点）"
+            else
+              echo "❌ [节点$n] 访问 lunes 失败（非登录页或状态异常）"
+              fail=1
+            fi
+          done
+
+          pkill -f sing-box 2>/dev/null || true
+          echo ""
+          echo "=============== 汇总 ==============="
+          if [ $fail -eq 0 ]; then
+            echo "✅ 全部测试项通过"
+          else
+            echo "❌ 存在失败项，详见上方日志"
+            exit 1
+          fi
+
+      - name: 🧹 清理旧的工作流运行记录
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
