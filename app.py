@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# ── 变更记录 ─────────────────────────────────────────────
+# 20261007-1148 双工作流改造：新增 ACCOUNT_INDEX 按槽位选账号，配套 login-acc1/login-acc2
+#             两个错峰定时 workflow，删除原单工作流 login.yml；未设置时保持跑全部账号的旧行为
+# 20261007-1350 环境变量编号统一：LUNES_EMAIL1/2、LUNES_PASSWORD1/2、NODE_LINK1/2 与槽位一一对应；
+#             节点改按槽位领取（删 assign_node），旧多行 NODE_LINK 保留为兼容回退
+# 20261007-1355 配置校验加固：账号凭据 strip() 防误粘空白；配置不齐/ACCOUNT_INDEX 非法
+#             由静默 return 改为 sys.exit(1)，workflow 显式红叉并触发 GitHub 失败邮件
+# ─────────────────────────────────────────────────────────
+
 import os
+import sys
 import json
 import time
 import socket
@@ -12,21 +22,25 @@ import random
 from seleniumbase import SB
 
 # 从环境变量获取账号密码和 TG 配置
-EMAIL        = os.environ.get("LUNES_EMAIL") or ""     # 登录邮箱（账号1）
-PASSWORD     = os.environ.get("LUNES_PASSWORD") or ""  # 登录密码（账号1）
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""      # chat id,可选
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""    # bot token,可选
-
-# 账号2 环境变量（可选；不配置时自动跳过，行为与单账号版一致）
-EMAIL1       = os.environ.get("LUNES_EMAIL1") or ""    # 登录邮箱（账号2）
-PASSWORD1    = os.environ.get("LUNES_PASSWORD1") or "" # 登录密码（账号2）
+# 🆕 修改：环境变量编号与 ACCOUNT_INDEX 槽位统一——账号1 用 LUNES_EMAIL1/LUNES_PASSWORD1/NODE_LINK1，
+#          账号2 用 LUNES_EMAIL2/LUNES_PASSWORD2/NODE_LINK2（旧命名 LUNES_EMAIL/LUNES_EMAIL1 弃用）
+# 🆕 修改：凭据统一 strip()，secret 误粘首尾空白时按「未配置」处理而不是带垃圾值去登录
+#          （注意：密码本身含首尾空格的极端情况不受支持）
+EMAIL1       = (os.environ.get("LUNES_EMAIL1") or "").strip()    # 登录邮箱（账号1）
+PASSWORD1    = (os.environ.get("LUNES_PASSWORD1") or "").strip() # 登录密码（账号1）
+TG_CHAT_ID   = (os.environ.get("TG_CHAT_ID") or "").strip()      # chat id,可选
+TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()    # bot token,可选
+EMAIL2       = (os.environ.get("LUNES_EMAIL2") or "").strip()    # 登录邮箱（账号2，可选；不配则跳过）
+PASSWORD2    = (os.environ.get("LUNES_PASSWORD2") or "").strip() # 登录密码（账号2，可选；不配则跳过）
 
 # 账号列表——只收集「邮箱+密码都齐全」的账号，main 里依次执行
+# 条目带 slot 字段（1/2）供 ACCOUNT_INDEX 按槽位选择，与「实际配了几个账号」解耦：
+# 双工作流模式下，acc2 的 run 只传账号2凭据也能正确选中
 ACCOUNTS = []
-if EMAIL and PASSWORD:
-    ACCOUNTS.append({"name": "账号1", "email": EMAIL,  "password": PASSWORD,  "shot": "acc1", "flag": "🇺🇸"})
 if EMAIL1 and PASSWORD1:
-    ACCOUNTS.append({"name": "账号2", "email": EMAIL1, "password": PASSWORD1, "shot": "acc2", "flag": "🇩🇪"})
+    ACCOUNTS.append({"slot": 1, "name": "账号1", "email": EMAIL1, "password": PASSWORD1, "shot": "acc1", "flag": "🇺🇸"})
+if EMAIL2 and PASSWORD2:
+    ACCOUNTS.append({"slot": 2, "name": "账号2", "email": EMAIL2, "password": PASSWORD2, "shot": "acc2", "flag": "🇩🇪"})
 
 LOGIN_URL = "https://betadash.lunes.host/login?next=/"
 
@@ -78,27 +92,26 @@ def send_tg_message(status_icon, status_text, extra_text="", email="", name="", 
         print(f"  ⚠️ Telegram 通知发送异常: {e}")
 
 # ============ 🆕 多节点代理管理 ============
-# NODE_LINK 支持多行（一行一个节点）：
-#   0 行        → 全部直连（原逻辑）
-#   1 行        → 账号1、账号2 都走该节点
-#   2 行        → 账号1 走第1行，账号2 走第2行
-#   3 行及以上  → 只取前 2 行，多余忽略
-def parse_node_links():
+# 🆕 修改：节点配置与槽位编号统一——
+#   NODE_LINK1 → 账号1 专属节点（填多行时只取第 1 行）
+#   NODE_LINK2 → 账号2 专属节点（同上）
+#   兼容回退：两者都未配置时，按旧逻辑解析多行 NODE_LINK
+#   （第1行→账号1，第2行→账号2，3 行及以上只取前 2 行）
+def parse_nodes():
+    nodes = {}
+    for slot in (1, 2):
+        raw = (os.environ.get(f"NODE_LINK{slot}") or "").strip()
+        if raw:
+            first = raw.splitlines()[0].strip()
+            if first:
+                nodes[slot] = first
+    if nodes:
+        return nodes
     raw = os.environ.get("NODE_LINK") or ""
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
     if len(lines) > 2:
         print(f"ℹ️ NODE_LINK 共 {len(lines)} 行，只取前 2 行，其余忽略。")
-    return lines[:2]
-
-# 按账号序号分配节点，返回 (节点链接 or None, 展示标签)
-def assign_node(nodes, idx):
-    if not nodes:
-        return None, "直连"
-    if len(nodes) == 1:
-        return nodes[0], "节点1"
-    if idx < len(nodes):
-        return nodes[idx], f"节点{idx + 1}"
-    return nodes[-1], f"节点{len(nodes)}"
+    return {i + 1: line for i, line in enumerate(lines[:2])}
 
 # setup_proxy.sh 支持的协议（2026-10 核对该脚本源码确认，不支持 ss://）
 SUPPORTED_PROTOS = {"vless", "vmess", "trojan", "hysteria2", "hy2", "tuic", "anytls", "socks5", "socks"}
@@ -652,10 +665,11 @@ def run_account(base_kwargs, acc, node_link, proxy_label) -> bool:
 def main():
     sb_kwargs = {"uc": True, "headless": False}
 
-    # 🆕 修改：代理来源改为解析 NODE_LINK 多行节点（优先级最高）
-    nodes = parse_node_links()
+    # 🆕 修改：节点按槽位从 NODE_LINK1/NODE_LINK2 领取（双工作流约定）；
+    #          两者都未配置时回退旧多行 NODE_LINK 位置分配
+    nodes = parse_nodes()
     if nodes:
-        print(f"🔗 NODE_LINK 检测到 {len(nodes)} 个有效节点。")
+        print(f"🔗 检测到 {len(nodes)} 个有效节点（槽位: {sorted(nodes)}）。")
     else:
         # 兼容旧逻辑：外部已自行在 1081 起好代理时，可用 IS_PROXY=true 挂载
         is_proxy = os.environ.get("IS_PROXY", "false").lower() == "true"
@@ -665,18 +679,36 @@ def main():
         else:
             print("🌐 未配置 NODE_LINK 代理，直连访问")
 
+    # 🆕 修改：配置不齐/参数非法由静默 return 改为 exit(1)——workflow 显式红叉，
+    #          GitHub 会发失败邮件，避免「绿色成功但实际空跑」被漏察觉
     if not ACCOUNTS:
-        print("❌ 未配置任何账号（LUNES_EMAIL/LUNES_PASSWORD 均为空），退出。")
-        return
+        print("❌ 未配置任何账号（账号1/账号2 的邮箱密码均未配置齐全），退出。")
+        sys.exit(1)
 
-    print(f"📋 共配置 {len(ACCOUNTS)} 个账号，依次执行。")
+    # 🆕 新增：ACCOUNT_INDEX 按槽位选账号（双工作流模式）。
+    #          "1" 只跑槽位1账号，"2" 只跑槽位2账号；未设置则跑全部（旧行为）。
+    #          账号槽位、凭据、节点编号一一对应（LUNES_EMAIL{n}/NODE_LINK{n}）
+    sel = (os.environ.get("ACCOUNT_INDEX") or "").strip()
+    if sel and sel not in ("1", "2"):
+        print(f"❌ ACCOUNT_INDEX={sel} 无效（只接受 1 或 2），退出。")
+        sys.exit(1)
+    selected = [acc for acc in ACCOUNTS if not sel or str(acc["slot"]) == sel]
+    if sel and not selected:
+        print(f"❌ ACCOUNT_INDEX={sel} 对应的账号未配置（邮箱/密码不齐全），退出。")
+        sys.exit(1)
+
+    if sel:
+        print(f"📋 双工作流模式：本次只执行 slot={sel} 账号（仓库共配置 {len(ACCOUNTS)} 个）。")
+    else:
+        print(f"📋 共配置 {len(ACCOUNTS)} 个账号，依次执行。")
 
     results = []
-    for idx, acc in enumerate(ACCOUNTS):
-        node, label = assign_node(nodes, idx)   # 🆕 每个账号领自己的节点
+    for pos, acc in enumerate(selected):
+        node  = nodes.get(acc["slot"])          # 🆕 每个账号按槽位领自己的 NODE_LINK{n}
+        label = f"节点{acc['slot']}" if node else "直连"
         ok = run_account(sb_kwargs, acc, node, label)
         results.append((acc["name"], ok))
-        if idx < len(ACCOUNTS) - 1:
+        if pos < len(selected) - 1:
             wait_seconds = random.randint(60, 180)
             print(f"\n⏳ 随机等待 {wait_seconds} 秒（约 {wait_seconds / 60:.1f} 分钟）后执行下一账号，避免多账号行为过于规律...")
             time.sleep(wait_seconds)

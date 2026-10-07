@@ -1,14 +1,19 @@
-name: Auto-login-Lunes
+# 双工作流改造（20261007-1148）：账号2 专属工作流。
+# 与 login-acc1.yml 的区别：cron 日期错开 5 天（7/17/27 vs 2/12/22）、时分错开
+# （UTC 03:17 vs 06:04，降低两账号登录时间相关性 + 避免 time.txt 推送竞争）、
+# 只传账号2凭据、节点取 NODE_LINK2、ACCOUNT_INDEX=2。
+# 环境变量编号与槽位统一（20261007-1350）：LUNES_EMAIL2/LUNES_PASSWORD2/NODE_LINK2 → 账号2。
+name: Auto-login-Lunes-Acc2
 
 on:
   workflow_dispatch:            # 手动触发
   schedule:
     # ⚠️ cron 只认 UTC：北京时间 = UTC + 8
-    # 当前：每月 5/15/25 日 UTC 06:04 = 北京时间 14:04，间隔均匀约 10 天
-    - cron: '4 6 5,15,25 * *'
+    # 当前：每月 7/17/27 日 UTC 03:17 = 北京时间 11:17，间隔均匀约 10 天
+    - cron: '17 3 7,17,27 * *'
 
 jobs:
-  Renew-lunes:
+  Renew-lunes-acc2:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -30,24 +35,17 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # 🆕 修改：原「设置sing-box代理转发」步骤改为只下载安装脚本。
-      # 真正的 sing-box 启动改由 app.py 按账号逐节点调用本脚本完成：
-      #   NODE_LINK 第1行 → 账号1，第2行 → 账号2；仅1行则共用；为空则直连。
+      # 只下载安装脚本；sing-box 由 app.py 按账号节点调用本脚本启动
       - name: 📥 下载 sing-box 安装脚本
         run: wget -qO setup_proxy.sh https://main.ssss.nyc.mn/setup_proxy.sh
 
-      - name: 🚀 运行续期脚本
+      - name: 🚀 运行续期脚本（账号2）
         env:
-          LUNES_EMAIL: ${{ secrets.LUNES_EMAIL }}
-          LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
-          LUNES_EMAIL1: ${{ secrets.LUNES_EMAIL1 }}       # 账号2（可选，不配则自动跳过）
-          LUNES_PASSWORD1: ${{ secrets.LUNES_PASSWORD1 }} # 账号2 密码
-          # 🆕 修改：NODE_LINK 支持多行节点（一行一个），直接在 secret 里换行填写。
-          #   2 行 → 账号1 用第1行、账号2 用第2行
-          #   1 行 → 账号1、账号2 共用该节点
-          #   3 行及以上 → 只取前 2 行，多余忽略
-          #   留空/不配置 → 全部直连
-          NODE_LINK: ${{ secrets.NODE_LINK }}
+          ACCOUNT_INDEX: "2"                                 # 🆕 只跑 slot=2 账号
+          LUNES_EMAIL2: ${{ secrets.LUNES_EMAIL2 }}          # 账号2 凭据（编号=槽位）
+          LUNES_PASSWORD2: ${{ secrets.LUNES_PASSWORD2 }}
+          # 账号2 专属节点（可选，不配则直连）；建议与 NODE_LINK1 出口不同，防 IP 关联
+          NODE_LINK2: ${{ secrets.NODE_LINK2 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -60,7 +58,7 @@ jobs:
         run: pkill -f sing-box || true
 
       # 更新时间到 time.txt，避免仓库长期无活动导致 schedule 被自动停用
-      # （60 天无活动自动禁用只针对 public 仓库；private 仓库无此限制）
+      # （两账号 cron 时分均已错开，正常不会撞车；pull --rebase 兜底偶发竞争）
       - name: 更新时间
         run: |
           git config user.name "github-actions[bot]"
