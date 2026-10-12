@@ -1,0 +1,85 @@
+# 账号3 专属工作流（20261012-2158 槽位动态化后新增，零代码改动）。
+# cron 与账号1（2/12/22 06:04）、账号2（7/17/27 03:17）错峰：日期取 4/14/24，时分取 UTC 10:41。
+# 只传账号3凭据、节点取 NODE_LINK3、ACCOUNT_INDEX=3；NODE_LINK3 未配置时账号3 直连，
+# 后续在仓库加 NODE_LINK3 secret 即可挂节点，本文件无需再改。
+on:
+  workflow_dispatch:            # 手动触发
+  schedule:
+    # ⚠️ cron 只认 UTC：北京时间 = UTC + 8
+    # 当前：每月 4/14/24 日 UTC 10:41 = 北京时间 18:41，间隔均匀约 10 天
+    - cron: '41 10 4,14,24 * *'
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write           # time.txt 提交推送需要
+      actions: write            # gh run delete 清理记录需要
+    steps:
+      - name: 📥 下载代码
+        uses: actions/checkout@v6
+
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 🛠️ 安装系统依赖和Python依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install xvfb x11-utils xdotool scrot fonts-noto-cjk -y
+          pip install seleniumbase aiohttp requests
+          seleniumbase install chromedriver
+
+      # 只下载安装脚本；sing-box 由 app.py 按账号节点调用本脚本启动
+      - name: 📥 下载 sing-box 安装脚本
+        run: wget -qO setup_proxy.sh https://main.ssss.nyc.mn/setup_proxy.sh
+
+      - name: 🚀 运行续期脚本（账号3）
+        env:
+          ACCOUNT_INDEX: "3"                                 # 只跑 slot=3 账号
+          LUNES_EMAIL3: ${{ secrets.LUNES_EMAIL3 }}          # 账号3 凭据（编号=槽位）
+          LUNES_PASSWORD3: ${{ secrets.LUNES_PASSWORD3 }}
+          # 账号3 专属节点（当前未配置 → 直连；补 secret 即生效，无需改本文件）
+          NODE_LINK3: ${{ secrets.NODE_LINK3 }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+          python3 app.py
+
+      # 兜底：清理可能残留的 sing-box 进程
+      - name: 🧹 清理 sing-box 进程
+        if: always()
+        run: pkill -f sing-box || true
+
+      # 更新时间到 time.txt，避免仓库长期无活动导致 schedule 被自动停用
+      # （三个账号 cron 时分均已错开，正常不会撞车；pull --rebase 兜底偶发竞争）
+      - name: 更新时间
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "No need to commit"
+          else
+            git commit -m "⏱️ Auto Update by Github Actions: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+            git pull --rebase origin main || true
+            git push origin main
+          fi
+
+      - name: 🧹 清理旧的工作流运行记录
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
