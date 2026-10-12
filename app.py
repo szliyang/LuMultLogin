@@ -10,6 +10,8 @@
 #             由静默 return 改为 sys.exit(1)，workflow 显式红叉并触发 GitHub 失败邮件
 # 20261007-1504 日志 IP 掩码：出口 IP / 强制 IPv4 改写 / IPv6 字面量警告统一 mask_ip()，
 #             每段只留首位数字加一个固定 *（不泄露段内位数），形如 1*.2*.3*.4*
+# 20261012-2158 槽位动态化（路线A）：凭据/节点/ACCOUNT_INDEX 由写死 1/2 改为 1..MAX_SLOT(10)
+#             枚举发现，新增账号只需 workflow + secrets，app.py 不再需要改动
 # ─────────────────────────────────────────────────────────
 
 import os
@@ -23,26 +25,31 @@ import re
 import random
 from seleniumbase import SB
 
-# 从环境变量获取账号密码和 TG 配置
-# 🆕 修改：环境变量编号与 ACCOUNT_INDEX 槽位统一——账号1 用 LUNES_EMAIL1/LUNES_PASSWORD1/NODE_LINK1，
-#          账号2 用 LUNES_EMAIL2/LUNES_PASSWORD2/NODE_LINK2（旧命名 LUNES_EMAIL/LUNES_EMAIL1 弃用）
-# 🆕 修改：凭据统一 strip()，secret 误粘首尾空白时按「未配置」处理而不是带垃圾值去登录
+# 从环境变量获取 TG 配置
+# 🆕 修改（槽位动态化）：账号凭据不再写死两个，改为按槽位 1..MAX_SLOT 枚举
+#          LUNES_EMAIL{n}/LUNES_PASSWORD{n}，配了几个算几个——新增账号只需 workflow + secrets，
+#          app.py 无需改动（旧命名 LUNES_EMAIL/LUNES_EMAIL1 弃用）。
+#          凭据统一 strip()，secret 误粘首尾空白时按「未配置」处理而不是带垃圾值去登录
 #          （注意：密码本身含首尾空格的极端情况不受支持）
-EMAIL1       = (os.environ.get("LUNES_EMAIL1") or "").strip()    # 登录邮箱（账号1）
-PASSWORD1    = (os.environ.get("LUNES_PASSWORD1") or "").strip() # 登录密码（账号1）
 TG_CHAT_ID   = (os.environ.get("TG_CHAT_ID") or "").strip()      # chat id,可选
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()    # bot token,可选
-EMAIL2       = (os.environ.get("LUNES_EMAIL2") or "").strip()    # 登录邮箱（账号2，可选；不配则跳过）
-PASSWORD2    = (os.environ.get("LUNES_PASSWORD2") or "").strip() # 登录密码（账号2，可选；不配则跳过）
 
-# 账号列表——只收集「邮箱+密码都齐全」的账号，main 里依次执行
-# 条目带 slot 字段（1/2）供 ACCOUNT_INDEX 按槽位选择，与「实际配了几个账号」解耦：
-# 双工作流模式下，acc2 的 run 只传账号2凭据也能正确选中
+# 账号槽位上限：凭据/节点/ACCOUNT_INDEX 的编号 n 均取 1..MAX_SLOT
+MAX_SLOT = 10
+
+# 各账号 TG 推送标识（按需增改；未列出的槽位用 🌐）
+SLOT_FLAGS = {1: "🇺🇸", 2: "🇩🇪"}
+
+# 账号列表——按槽位枚举，只收集「邮箱+密码都齐全」的账号，main 里依次执行
+# 条目带 slot 字段供 ACCOUNT_INDEX 按槽位选择，与「实际配了几个账号」解耦：
+# 双工作流模式下，accN 的 run 只传账号N凭据也能正确选中
 ACCOUNTS = []
-if EMAIL1 and PASSWORD1:
-    ACCOUNTS.append({"slot": 1, "name": "账号1", "email": EMAIL1, "password": PASSWORD1, "shot": "acc1", "flag": "🇺🇸"})
-if EMAIL2 and PASSWORD2:
-    ACCOUNTS.append({"slot": 2, "name": "账号2", "email": EMAIL2, "password": PASSWORD2, "shot": "acc2", "flag": "🇩🇪"})
+for _i in range(1, MAX_SLOT + 1):
+    _email    = (os.environ.get(f"LUNES_EMAIL{_i}") or "").strip()
+    _password = (os.environ.get(f"LUNES_PASSWORD{_i}") or "").strip()
+    if _email and _password:
+        ACCOUNTS.append({"slot": _i, "name": f"账号{_i}", "email": _email, "password": _password,
+                         "shot": f"acc{_i}", "flag": SLOT_FLAGS.get(_i, "🌐")})
 
 LOGIN_URL = "https://betadash.lunes.host/login?next=/"
 
@@ -107,14 +114,13 @@ def send_tg_message(status_icon, status_text, extra_text="", email="", name="", 
         print(f"  ⚠️ Telegram 通知发送异常: {e}")
 
 # ============ 🆕 多节点代理管理 ============
-# 🆕 修改：节点配置与槽位编号统一——
-#   NODE_LINK1 → 账号1 专属节点（填多行时只取第 1 行）
-#   NODE_LINK2 → 账号2 专属节点（同上）
-#   兼容回退：两者都未配置时，按旧逻辑解析多行 NODE_LINK
+# 🆕 修改（槽位动态化）：节点配置按槽位 1..MAX_SLOT 动态发现——
+#   NODE_LINK{n} → 账号n 专属节点（填多行时只取第 1 行）
+#   兼容回退：一个都没配时，按旧逻辑解析多行 NODE_LINK
 #   （第1行→账号1，第2行→账号2，3 行及以上只取前 2 行）
 def parse_nodes():
     nodes = {}
-    for slot in (1, 2):
+    for slot in range(1, MAX_SLOT + 1):
         raw = (os.environ.get(f"NODE_LINK{slot}") or "").strip()
         if raw:
             first = raw.splitlines()[0].strip()
@@ -697,15 +703,14 @@ def main():
     # 🆕 修改：配置不齐/参数非法由静默 return 改为 exit(1)——workflow 显式红叉，
     #          GitHub 会发失败邮件，避免「绿色成功但实际空跑」被漏察觉
     if not ACCOUNTS:
-        print("❌ 未配置任何账号（账号1/账号2 的邮箱密码均未配置齐全），退出。")
+        print(f"❌ 未配置任何账号（槽位 1~{MAX_SLOT} 均未配置齐全邮箱密码），退出。")
         sys.exit(1)
 
-    # 🆕 新增：ACCOUNT_INDEX 按槽位选账号（双工作流模式）。
-    #          "1" 只跑槽位1账号，"2" 只跑槽位2账号；未设置则跑全部（旧行为）。
-    #          账号槽位、凭据、节点编号一一对应（LUNES_EMAIL{n}/NODE_LINK{n}）
+    # ACCOUNT_INDEX 按槽位选账号（双工作流模式）：设为 n 只跑槽位 n 账号；未设置则跑全部（旧行为）。
+    # 账号槽位、凭据、节点编号一一对应（LUNES_EMAIL{n}/NODE_LINK{n}），n=1..MAX_SLOT
     sel = (os.environ.get("ACCOUNT_INDEX") or "").strip()
-    if sel and sel not in ("1", "2"):
-        print(f"❌ ACCOUNT_INDEX={sel} 无效（只接受 1 或 2），退出。")
+    if sel and (not sel.isdigit() or not (1 <= int(sel) <= MAX_SLOT)):
+        print(f"❌ ACCOUNT_INDEX={sel} 无效（只接受 1~{MAX_SLOT} 的槽位号），退出。")
         sys.exit(1)
     selected = [acc for acc in ACCOUNTS if not sel or str(acc["slot"]) == sel]
     if sel and not selected:

@@ -3,8 +3,8 @@
 # （UTC 03:17 vs 06:04，降低两账号登录时间相关性 + 避免 time.txt 推送竞争）、
 # 只传账号2凭据、节点取 NODE_LINK2、ACCOUNT_INDEX=2。
 # 环境变量编号与槽位统一（20261007-1350）：LUNES_EMAIL2/LUNES_PASSWORD2/NODE_LINK2 → 账号2。
-name: Auto-login-Lunes-Acc2
-
+# 精简（20261012-2138）：去掉 workflow name——未设置时 github.workflow 自动等于文件名（login-acc2.yml），
+# 天然唯一，Actions 显示与 run 清理过滤都回退到文件名，复制本文件改文件名即得新账号工作流；job id 统一为 renew。
 on:
   workflow_dispatch:            # 手动触发
   schedule:
@@ -13,7 +13,7 @@ on:
     - cron: '17 3 7,17,27 * *'
 
 jobs:
-  Renew-lunes-acc2:
+  renew:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

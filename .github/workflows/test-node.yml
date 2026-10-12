@@ -10,6 +10,8 @@
 #   ❌ cf-mitigated: block / 非 200 / 超时      → 节点不可用
 #   curl 无法执行 JS，Turnstile 交互挑战能否通过仍以真实续期流程为准。
 # 日志 IP 掩码（20261007-1504）：出口 IP 每段只留首位数字加固定 *（不泄露位数），形如 1*.2*.3*.4*。
+# 槽位动态化（20261012-2158）：env 预置 NODE_LINK1~10 引用（secret 未配置时注入空串，无害），
+#   bash 枚举非空项依次测试——新增账号无需改本文件。
 name: Test-Node-Link
 
 on:
@@ -35,6 +37,14 @@ jobs:
           INPUT_LINK: ${{ inputs.node_link }}
           NODE_LINK1: ${{ secrets.NODE_LINK1 }}
           NODE_LINK2: ${{ secrets.NODE_LINK2 }}
+          NODE_LINK3: ${{ secrets.NODE_LINK3 }}
+          NODE_LINK4: ${{ secrets.NODE_LINK4 }}
+          NODE_LINK5: ${{ secrets.NODE_LINK5 }}
+          NODE_LINK6: ${{ secrets.NODE_LINK6 }}
+          NODE_LINK7: ${{ secrets.NODE_LINK7 }}
+          NODE_LINK8: ${{ secrets.NODE_LINK8 }}
+          NODE_LINK9: ${{ secrets.NODE_LINK9 }}
+          NODE_LINK10: ${{ secrets.NODE_LINK10 }}
         run: |
           set -u
           PROXY=http://127.0.0.1:1081
@@ -53,34 +63,38 @@ jobs:
             fi
           }
 
+          # 待测清单：INPUT_LINK 临时输入优先；否则枚举 NODE_LINK1~10（配了几个测几个）
+          slots=()
           links=()
           if [ -n "$INPUT_LINK" ]; then
-            links+=("$INPUT_LINK")
+            slots+=("0"); links+=("$INPUT_LINK")     # 0 = 临时输入
           else
-            [ -n "$NODE_LINK1" ] && links+=("$NODE_LINK1")
-            [ -n "$NODE_LINK2" ] && links+=("$NODE_LINK2")
+            for n in $(seq 1 10); do
+              v="NODE_LINK$n"
+              if [ -n "${!v}" ]; then slots+=("$n"); links+=("${!v}"); fi
+            done
           fi
           if [ ${#links[@]} -eq 0 ]; then
-            echo "❌ 未提供待测节点（inputs.node_link 与 NODE_LINK1/2 均为空）"
+            echo "❌ 未提供待测节点（inputs.node_link 与 NODE_LINK1~10 均为空）"
             exit 1
           fi
 
           fail=0
           for i in "${!links[@]}"; do
-            n=$((i+1))
+            if [ "${slots[$i]}" = "0" ]; then tag="输入"; else tag="槽位${slots[$i]}"; fi
             echo ""
-            echo "=============== 测试节点 $n / ${#links[@]} ==============="
+            echo "=============== 测试节点 $((i+1))/${#links[@]} [$tag] ==============="
 
             proto=$(echo "${links[$i]}" | cut -d: -f1)
             if ! echo " $SUP " | grep -q " $proto "; then
-              echo "❌ [节点$n] 协议 [$proto] 不被 setup_proxy.sh 支持（支持: $SUP）"
+              echo "❌ [$tag] 协议 [$proto] 不被 setup_proxy.sh 支持（支持: $SUP）"
               fail=1; continue
             fi
 
             pkill -f sing-box 2>/dev/null || true
             sleep 1
             if ! NODE_LINK="${links[$i]}" bash setup_proxy.sh; then
-              echo "❌ [节点$n] sing-box 启动或出口连通失败（节点失效/被墙/参数错误）"
+              echo "❌ [$tag] sing-box 启动或出口连通失败（节点失效/被墙/参数错误）"
               fail=1; continue
             fi
 
@@ -110,14 +124,14 @@ jobs:
                    -w '%{http_code}' --max-time 20 'https://betadash.lunes.host/login?next=/')
             echo "HTTP 状态码: ${code:-无响应}"
             if [ "$code" = "200" ] && grep -q 'name="email"' /tmp/b_$n 2>/dev/null; then
-              echo "✅ [节点$n] 可正常访问 lunes 登录页（返回真实登录表单）"
+              echo "✅ [$tag] 可正常访问 lunes 登录页（返回真实登录表单）"
             elif grep -qi '^cf-mitigated: *block' /tmp/h_$n 2>/dev/null; then
-              echo "❌ [节点$n] 被 Cloudflare 明确拦截（cf-mitigated: block），建议换节点"
+              echo "❌ [$tag] 被 Cloudflare 明确拦截（cf-mitigated: block），建议换节点"
               fail=1
             elif grep -qi '^cf-mitigated: *challenge' /tmp/h_$n 2>/dev/null || grep -q 'Just a moment' /tmp/b_$n 2>/dev/null; then
-              echo "⚠️ [节点$n] 遇到 Cloudflare 挑战页（IP 信誉一般；真实浏览器可能仍能通过，建议优先选 ✅ 节点）"
+              echo "⚠️ [$tag] 遇到 Cloudflare 挑战页（IP 信誉一般；真实浏览器可能仍能通过，建议优先选 ✅ 节点）"
             else
-              echo "❌ [节点$n] 访问 lunes 失败（非登录页或状态异常）"
+              echo "❌ [$tag] 访问 lunes 失败（非登录页或状态异常）"
               fail=1
             fi
           done

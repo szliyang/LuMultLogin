@@ -19,10 +19,12 @@
 
 | 工作流 | 账号 | cron（UTC） | 北京时间 | 每月日期 |
 |----------------------|------|-------------|----------|----------|
-| Auto-login-Lunes-Acc1 | 账号1🇺🇸 | `4 6 2,12,22 * *` | 14:04 | 2 / 12 / 22 日 |
-| Auto-login-Lunes-Acc2 | 账号2🇩🇪 | `17 3 7,17,27 * *` | 11:17 | 7 / 17 / 27 日 |
+| login-acc1.yml | 账号1🇺🇸 | `4 6 2,12,22 * *` | 14:04 | 2 / 12 / 22 日 |
+| login-acc2.yml | 账号2🇩🇪 | `17 3 7,17,27 * *` | 11:17 | 7 / 17 / 27 日 |
 
 两账号各自保持约 10 天的续期间隔；日期、小时、分钟三重错开，同时避免 time.txt 推送竞争。
+
+> ➕ 新增账号的配方（槽位动态化后**零代码改动**）：复制任一 `login-accN.yml` 为 `login-acc{n}.yml` → 改 cron 错峰日期/时分 → env 里凭据/节点/`ACCOUNT_INDEX` 的编号改为新槽位号 → 加 secrets（`LUNES_EMAIL{n}`/`LUNES_PASSWORD{n}`/`NODE_LINK{n}`，n ≤ 10）。workflow 不设 `name`、job id 统一为 `renew`，复制改名即生效（Actions 显示与 run 清理过滤自动回退到文件名）；app.py 与 test-node.yml 均按槽位 1~10 动态发现，**无需再改任何代码**（test-node.yml 已预置 NODE_LINK1~10 引用）。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 
@@ -36,10 +38,12 @@
 | LUNES_PASSWORD2 | ❌ 可选   | lunes 登录密码2                                  | 
 | NODE_LINK1      | ❌ 可选  | 账号1 专属代理链接（Acc1 工作流；不配则账号1直连）          |
 | NODE_LINK2      | ❌ 可选  | 账号2 专属代理链接（Acc2 工作流；建议与 1 出口不同，防 IP 关联）|
+| LUNES_EMAIL{n} / LUNES_PASSWORD{n} | ❌ 可选 | 账号 n 凭据（n=3~10，复制 login-accN.yml 即新增，槽位动态发现） |
+| NODE_LINK{n}    | ❌ 可选  | 账号 n 专属代理链接（n=3~10；不同账号建议出口不同，防 IP 关联）|
 | TG_BOT_TOKEN    | ❌ 可选  | Telegram Bot Token（用于发送通知）                     |
 | TG_CHAT_ID      | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）              |
 
-> 环境变量编号与账号槽位一一对应：`ACCOUNT_INDEX=1` ↔ `LUNES_EMAIL1`/`NODE_LINK1`，`ACCOUNT_INDEX=2` ↔ `LUNES_EMAIL2`/`NODE_LINK2`。
+> 环境变量编号与账号槽位一一对应：`ACCOUNT_INDEX=n` ↔ `LUNES_EMAIL{n}`/`NODE_LINK{n}`，n = 1~10。
 > 旧的 `LUNES_EMAIL`/`LUNES_PASSWORD`（无编号）及 `NODE_LINK_A`/`NODE_LINK_B` 命名已弃用；
 > 旧多行 `NODE_LINK`（第1行账号1、第2行账号2）仅作手动运行时的兼容回退，工作流不再引用。
 

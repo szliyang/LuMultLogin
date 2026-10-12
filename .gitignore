@@ -1,0 +1,5 @@
+# macOS / IDE / Python 本地杂物
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
